@@ -8,6 +8,10 @@
  * After changing this code later: Deploy -> Manage deployments -> edit
  * (pencil) -> Version: New version -> Deploy. The URL stays the same.
  *
+ * SPEED: add an installable trigger once: Triggers -> Add trigger ->
+ * onSheetEdit_ -> From spreadsheet -> On edit. It clears the read cache when
+ * you edit the Sheet by hand (script writes invalidate the cache themselves).
+ *
  * Tabs (created automatically): Customers, Leads, FieldExecutives, Admins,
  * Devices (master list of brands/models), Lists (colours / RAM / storage choices).
  *
@@ -51,6 +55,15 @@ const FE_CAN_SEE_ALL_LEADS = true;
 const LEAD_EDITABLE = ['lead_id', 'visit_date', 'device_brand', 'device_model', 'colour', 'ram', 'rom', 'imei1',
                        'accessories', 'expected_price', 'purchase_price', 'commission', 'commission_amount',
                        'status', 'remarks'];
+
+// ---- Read cache (speed) ----
+// Tabs listed here are cached for N seconds. FieldExecutives/Admins are NOT cached
+// (login must always see the latest password / active flag).
+const CACHED_TABS = { Customers: 600, Leads: 600, Devices: 3600, Lists: 3600 };
+
+// Write requests set this to true so they always read fresh data from the Sheet
+// (a stale row number could otherwise update the wrong row).
+let FORCE_FRESH_ = false;
 
 // ------------------------------------------------------------------
 // One-time setup
@@ -103,6 +116,7 @@ function ensureSchema_() {
     });
     if (sheet_('Devices').getLastRow() < 2) seedDevices_();
     if (sheet_('Lists').getLastRow() < 2) seedLists_();
+    Object.keys(CACHED_TABS).forEach(function (n) { cacheDrop_('tab_' + n); });
     props.setProperty('schema_version', String(SCHEMA_VERSION));
   });
 }
@@ -114,6 +128,14 @@ function changeAdminPassword() {
   const row = readAll_('Admins').filter(function (u) { return u.username === 'admin'; })[0];
   if (!row) throw new Error('No admin row found.');
   updateRow_('Admins', row._row, { password_hash: hashPassword_(NEW_PASSWORD) });
+}
+
+/**
+ * Installable "On edit" trigger (see header). Clears the read cache when someone edits
+ * the Sheet by hand, so the app never shows stale data for more than a moment.
+ */
+function onSheetEdit_(e) {
+  try { cacheDrop_('tab_' + e.range.getSheet().getName()); } catch (err) { /* ignore */ }
 }
 
 // ------------------------------------------------------------------
@@ -129,6 +151,7 @@ function doPost(e) {
     const req = JSON.parse(e.postData.contents);
     const def = ACTIONS[req.action];
     if (!def) return out_({ ok: false, error: 'Unknown action' });
+    if (def.write) FORCE_FRESH_ = true; // writes never read from the cache
     ensureSchema_(); // before any lock is taken by the action itself
 
     let session = null;
@@ -317,11 +340,19 @@ function uploadIdProof_(p) {
   return { path: file.getUrl(), name: f.fileName || safeName };
 }
 
+// The folder id per customer is cached, so repeat uploads skip the slow Drive folder search.
 function customerFolder_(customerId) {
+  const cache = CacheService.getScriptCache();
+  const cached = cache.get('cf_' + customerId);
+  if (cached) {
+    try { return DriveApp.getFolderById(cached); } catch (e) { /* folder gone, recreate below */ }
+  }
   return withLock_(function () {
     const root = idFolder_();
     const it = root.getFoldersByName(customerId);
-    return it.hasNext() ? it.next() : root.createFolder(customerId);
+    const folder = it.hasNext() ? it.next() : root.createFolder(customerId);
+    cache.put('cf_' + customerId, folder.getId(), 21600);
+    return folder;
   });
 }
 
@@ -580,7 +611,18 @@ function isText_(tab, col) {
   return (NON_TEXT[tab] || []).indexOf(col) < 0;
 }
 
+/** Cached read for the tabs in CACHED_TABS; write requests (FORCE_FRESH_) always read the Sheet. */
 function readAll_(name) {
+  const ttl = CACHED_TABS[name];
+  if (!ttl || FORCE_FRESH_) return readAllRaw_(name);
+  const hit = cacheGet_('tab_' + name);
+  if (hit) return hit;
+  const rows = readAllRaw_(name);
+  cachePut_('tab_' + name, rows, ttl);
+  return rows;
+}
+
+function readAllRaw_(name) {
   const values = sheet_(name).getDataRange().getValues();
   const headers = values.shift().map(function (h) { return String(h).trim(); });
   const rows = [];
@@ -605,18 +647,25 @@ function appendObj_(name, obj) {
     const v = obj[c] === undefined || obj[c] === null ? '' : obj[c];
     return isText_(name, c) ? String(v) : v;
   })]);
+  cacheDrop_('tab_' + name);
 }
 
+/** Reads the row once, patches it in memory, writes it back once (2-3 calls instead of ~2 per field). */
 function updateRow_(name, row, patch) {
   const sh = sheet_(name);
   const cols = headers_(sh);
+  const range = sh.getRange(row, 1, 1, cols.length);
+  const vals = range.getValues()[0];
+  const fmts = range.getNumberFormats()[0];
   Object.keys(patch).forEach(function (k) {
-    const col = cols.indexOf(k) + 1;
-    if (col < 1) return;
-    const cell = sh.getRange(row, col);
-    if (isText_(name, k)) cell.setNumberFormat('@').setValue(String(patch[k]));
-    else cell.setValue(patch[k]);
+    const i = cols.indexOf(k);
+    if (i < 0) return;
+    if (isText_(name, k)) { fmts[i] = '@'; vals[i] = String(patch[k]); }
+    else vals[i] = patch[k];
   });
+  range.setNumberFormats([fmts]);
+  range.setValues([vals]);
+  cacheDrop_('tab_' + name);
 }
 
 function pub_(o) {
@@ -647,6 +696,43 @@ function withLock_(fn) {
 
 function out_(obj) {
   return ContentService.createTextOutput(JSON.stringify(obj)).setMimeType(ContentService.MimeType.JSON);
+}
+
+// ------------------------------------------------------------------
+// Read cache helpers (CacheService, values split into chunks because one value is limited to 100KB)
+// ------------------------------------------------------------------
+
+function cacheGet_(key) {
+  const c = CacheService.getScriptCache();
+  const n = Number(c.get(key + ':n') || 0);
+  if (!n) return null;
+  const keys = [];
+  for (let i = 0; i < n; i++) keys.push(key + ':' + i);
+  const parts = c.getAll(keys);
+  let s = '';
+  for (let i = 0; i < n; i++) {
+    if (parts[keys[i]] == null) return null;
+    s += parts[keys[i]];
+  }
+  try { return JSON.parse(s); } catch (e) { return null; }
+}
+
+function cachePut_(key, obj, ttl) {
+  const s = JSON.stringify(obj);
+  const SZ = 30000; // chars per chunk; safe for UTF-8 text, limit is 100KB per value
+  const n = Math.ceil(s.length / SZ) || 1;
+  const map = {};
+  for (let i = 0; i < n; i++) map[key + ':' + i] = s.substr(i * SZ, SZ);
+  map[key + ':n'] = String(n);
+  try { CacheService.getScriptCache().putAll(map, ttl); } catch (e) { /* too big for the cache: skip, just slower */ }
+}
+
+function cacheDrop_(key) {
+  const c = CacheService.getScriptCache();
+  const n = Number(c.get(key + ':n') || 0);
+  const keys = [key + ':n'];
+  for (let i = 0; i < n; i++) keys.push(key + ':' + i);
+  c.removeAll(keys);
 }
 
 // ------------------------------------------------------------------
