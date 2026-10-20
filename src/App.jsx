@@ -50,10 +50,8 @@ export default function App() {
   }, []);
 
   // Customers, leads and the device master need a login token, so they're loaded after login (or on
-  // refresh if still logged in) — as ONE request rather than three in parallel. Google Apps Script
-  // caps a free account at 30 requests running at once; firing three per login eats into that fast
-  // when more than a few people sign in around the same time, which showed up as an empty field-
-  // executive dropdown or "Unexpected response from the server".
+  // refresh if still logged in) — as ONE request. Right after a login, api.bootstrap() returns the
+  // data that already came back with the login response, so no extra network call is made.
   const loadData = useCallback(async () => {
     const { customers: custRows, leads: leadRows, deviceMaster: masterRaw } = await api.bootstrap();
     setCustomers(custRows.map(toCamelCustomer).sort(byCreated));
@@ -83,15 +81,34 @@ export default function App() {
     return () => window.removeEventListener("auth-expired", onExpired);
   }, [flash, clearSession, navigate]);
 
+  // api.submitLead() fires this after the server saved a new lead (and maybe a new customer),
+  // so the lists on screen update without another request.
+  useEffect(() => {
+    const onLeadSaved = (ev) => {
+      const { customer, lead } = ev.detail || {};
+      if (customer) {
+        const c = toCamelCustomer(customer);
+        setCustomers((prev) => (prev.some((x) => x.id === c.id) ? prev.map((x) => (x.id === c.id ? c : x)) : [...prev, c]));
+      }
+      if (lead) setLeads((prev) => [...prev, toCamelLead(lead)]);
+    };
+    window.addEventListener("lead-saved", onLeadSaved);
+    return () => window.removeEventListener("lead-saved", onLeadSaved);
+  }, []);
+
   useEffect(() => {
     (async () => {
       try {
-        const feRows = await api.listFieldExecutives(); // public: needed for the login dropdown
-        setFes(feRows.map(toCamelFe).sort(byName));
-        if (session) await loadData();
+        // field executives (public, for the login dropdown) and app data (only if logged in)
+        // load at the same time instead of one after the other
+        const fePromise = api.listFieldExecutives().then((feRows) => {
+          setFes(feRows.map(toCamelFe).sort(byName));
+        });
+        const dataPromise = session ? loadData() : Promise.resolve();
+        await Promise.all([fePromise, dataPromise]);
       } catch (e) {
         if (e.code !== "AUTH") {
-          setLoadError("Could not load data from Google Sheets. Check your connection and try again.");
+          setLoadError("Could not load data. Check your connection and try again.");
         }
       } finally {
         setReady(true);
@@ -99,18 +116,6 @@ export default function App() {
     })();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
-
-  const addCustomerRow = useCallback(async (customer) => {
-    try {
-      const data = await api.createCustomer(customer);
-      const mapped = toCamelCustomer(data);
-      setCustomers((prev) => [...prev, mapped]);
-      return mapped;
-    } catch (e) {
-      flash(e.message || "Could not save customer — try again", "error");
-      throw e;
-    }
-  }, [flash]);
 
   const updateCustomerRow = useCallback(async (id, patch) => {
     try {
@@ -120,18 +125,6 @@ export default function App() {
       return mapped;
     } catch (e) {
       flash(e.message || "Could not update customer — try again", "error");
-      throw e;
-    }
-  }, [flash]);
-
-  const addLeadRow = useCallback(async (lead) => {
-    try {
-      const data = await api.createLead(lead);
-      const mapped = toCamelLead(data);
-      setLeads((prev) => [...prev, mapped]);
-      return mapped;
-    } catch (e) {
-      flash(e.message || "Could not save lead — try again", "error");
       throw e;
     }
   }, [flash]);
@@ -216,9 +209,6 @@ export default function App() {
                 customers={customers}
                 leads={leads}
                 master={master}
-                addCustomerRow={addCustomerRow}
-                updateCustomerRow={updateCustomerRow}
-                addLeadRow={addLeadRow}
                 flash={flash}
                 onCancel={() => { setWizard(null); navigate("/fe/dashboard"); }}
                 onDone={(customerId) => { setWizard(null); navigate(`/customer/${customerId}`, { state: { from: "fe-dashboard" } }); }}

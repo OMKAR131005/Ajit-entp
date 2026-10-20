@@ -23,7 +23,7 @@ import { SavedCelebration } from "./SavedCelebration";
 // DeviceFields speaks in short names; the wizard state uses these keys.
 const DEVICE_KEYS = { brand: "deviceBrand", model: "deviceModel", colour: "deviceColour", ram: "deviceRam", rom: "deviceRom" };
 
-export function AddLeadWizard({ wizard, setWizard, fe, customers, leads, master, addCustomerRow, updateCustomerRow, addLeadRow, flash, onCancel, onDone, onFinishToDashboard }) {
+export function AddLeadWizard({ wizard, setWizard, fe, customers, leads, master, flash, onCancel, onDone, onFinishToDashboard }) {
   const w = wizard;
   const stepIndex = STEPS.indexOf(w.step);
   const set = (patch) => setWizard((cur) => ({ ...cur, ...patch }));
@@ -106,68 +106,53 @@ export function AddLeadWizard({ wizard, setWizard, fe, customers, leads, master,
     set({ idProofFilesByType: filesByType });
   };
 
-  // Single point of backend contact: creates customer (if new), uploads id proofs, saves lead, updates customer.
+  // Single point of backend contact. ONE request does everything on the server:
+  // creates the customer (if new), uploads the id proofs, saves the lead, updates the customer's id-proof fields.
+  // If any part fails, the server undoes what it created, so tapping Save again never makes a duplicate.
   const handleSave = async () => {
     if (submitting) return; // already saving — ignore extra clicks
     setSubmitting(true);
     try {
-      let customerId = w.customerId;
-
-      if (w.isNewCustomer) {
-        // The Sheet assigns the CUST-xxxxx id.
-        const saved = await addCustomerRow({
-          name: w.customerDraft.name.trim(),
-          mobile: w.mobile,
-          address: w.customerDraft.address.trim(),
-        });
-        customerId = saved.id;
-        // If a later step fails and the user taps Save again, reuse this customer instead of creating a duplicate.
-        set({ isNewCustomer: false, customerId });
-      }
-
+      // Photos are shrunk in the browser first (keeps the request small and fast).
       const filesByType = w.idProofFilesByType || {};
-      const uploadResults = await Promise.all(
+      const files = await Promise.all(
         Object.keys(filesByType).flatMap((type) =>
-          (filesByType[type] || []).map(async (file) => {
-            const payload = await fileToUpload(file);
-            return api.uploadIdProof(customerId, type, payload); // { path, name }
-          })
+          (filesByType[type] || []).map(async (file) => ({ type, file: await fileToUpload(file) }))
         )
       );
-      const idProofPaths = uploadResults.map((r) => r.path);
-      const idProofFileNames = uploadResults.map((r) => r.name);
 
-      await addLeadRow({
-        lead_id: w.leadId.trim(),
-        customer_id: customerId,
-        fe_username: fe.username,
-        fe_name: fe.name,
-        visit_date: new Date().toISOString(),
-        device_brand: w.deviceBrand.trim(),
-        device_model: w.deviceModel.trim(),
-        colour: w.deviceColour.trim(),
-        ram: ramApplies(w.deviceBrand) ? w.deviceRam : "",
-        rom: w.deviceRom,
-        imei1: w.imei,
-        accessories: joinAccessories(w.accessories),
-        expected_price: Number(w.purchasePrice),
-        purchase_price: Number(w.purchasePrice),
-        commission: Number(w.commission),
-        commission_amount: commissionAmount,
-        status: w.status,
-        remarks: w.remarks.trim(),
-        created_at: new Date().toISOString(),
+      const result = await api.submitLead({
+        new_customer: w.isNewCustomer
+          ? { name: w.customerDraft.name.trim(), mobile: w.mobile, address: w.customerDraft.address.trim() }
+          : null,
+        files,
+        id_proof_types: w.idProofTypes || [],
+        lead: {
+          lead_id: w.leadId.trim(),
+          customer_id: w.customerId,
+          fe_username: fe.username,
+          fe_name: fe.name,
+          visit_date: new Date().toISOString(),
+          device_brand: w.deviceBrand.trim(),
+          device_model: w.deviceModel.trim(),
+          colour: w.deviceColour.trim(),
+          ram: ramApplies(w.deviceBrand) ? w.deviceRam : "",
+          rom: w.deviceRom,
+          imei1: w.imei,
+          accessories: joinAccessories(w.accessories),
+          expected_price: Number(w.purchasePrice),
+          purchase_price: Number(w.purchasePrice),
+          commission: Number(w.commission),
+          commission_amount: commissionAmount,
+          status: w.status,
+          remarks: w.remarks.trim(),
+          created_at: new Date().toISOString(),
+        },
       });
 
-      if ((w.idProofTypes || []).length > 0 || idProofPaths.length > 0) {
-        await updateCustomerRow(customerId, {
-          id_proof_type: (w.idProofTypes || []).length > 0 ? w.idProofTypes.join(", ") : (customer?.idProofType || ""),
-          id_proof_path: idProofPaths.length > 0 ? idProofPaths.join(",") : (customer?.idProofPath || ""),
-          id_proof_file_name: idProofFileNames.length > 0 ? idProofFileNames.join(",") : (customer?.idProofFileName || ""),
-        });
-      }
+      const customerId = result.customer.id;
       flash("Lead saved.");
-      set({ step: "saved", customerId });
+      set({ isNewCustomer: false, step: "saved", customerId });
     } catch (e) {
       flash(e?.message || "Could not save lead — try again.", "error");
     } finally {

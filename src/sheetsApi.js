@@ -1,12 +1,23 @@
-// Google Sheets backend client (talks to the Apps Script web app in apps-script/Code.gs).
-// Set VITE_SHEETS_API_URL to the Web App /exec URL (in .env locally and in Vercel).
+// Backend client (talks to the Supabase Edge Function in supabase/functions/api/index.ts).
+// Set VITE_SHEETS_API_URL to the function URL (in .env locally and in Vercel).
 
 const API_URL = import.meta.env.VITE_SHEETS_API_URL;
 
 let token = null;
 try { token = sessionStorage.getItem("fl_token"); } catch { /* storage unavailable */ }
 
+// App data (customers + leads + device master) that arrives together with the login response,
+// so the first bootstrap() after login needs no extra network request.
+let prefetched = null;
+let prefetchedAt = 0;
+const PREFETCH_TTL_MS = 5000; // also covers React StrictMode (dev) running the same effect twice
+
+// While one listFieldExecutives request is in flight, a second identical call shares it.
+let fePromise = null;
+let bootPromise = null; // same idea for bootstrap's network call
+
 function setToken(t) {
+  if (!t) prefetched = null;
   token = t;
   try {
     if (t) sessionStorage.setItem("fl_token", t);
@@ -16,9 +27,8 @@ function setToken(t) {
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
-// Google's free tier allows 30 Apps Script requests running at once per account; a request that
-// lands when that's full comes back as a network failure or a non-JSON error page rather than a
-// normal error, so those two cases get a couple of quick, quiet retries before giving up.
+// A request that fails at the network level, or comes back as a non-JSON error page,
+// gets a couple of quick, quiet retries before giving up.
 async function fetchOnce(action, payload) {
   const res = await fetch(API_URL, {
     method: "POST",
@@ -32,8 +42,7 @@ async function fetchOnce(action, payload) {
 
 const RETRY_DELAYS_MS = [600, 1500]; // ~2 extra tries, under 2.5s total, before surfacing the error
 
-// Content-Type must be text/plain so the browser skips the CORS preflight,
-// which Apps Script web apps don't support.
+// Content-Type is text/plain so the browser skips the CORS preflight.
 async function call(action, payload = {}, { silent = false } = {}) {
   if (!API_URL) throw new Error("App is not configured (missing VITE_SHEETS_API_URL).");
 
@@ -104,10 +113,17 @@ export const api = {
   hasSession: () => !!token,
 
   // auth
-  listFieldExecutives: () => call("listFieldExecutives"),
+  listFieldExecutives: () => {
+    if (!fePromise) fePromise = call("listFieldExecutives").finally(() => { fePromise = null; });
+    return fePromise;
+  },
   login: async (role, username, password) => {
-    const session = await call("login", { role, username, password }); // role: "fe" | "admin"
+    // bootstrap: true -> the server sends customers + leads + device master in the same response
+    const session = await call("login", { role, username, password, bootstrap: true }); // role: "fe" | "admin"
     setToken(session.token);
+    prefetched = session.bootstrap || null;
+    prefetchedAt = Date.now();
+    delete session.bootstrap;
     return session; // { token, role, username, name }
   },
   logout: async () => {
@@ -123,16 +139,30 @@ export const api = {
   updateCustomer: (customer_id, patch) => call("updateCustomer", { customer_id, patch }),
   uploadIdProof: (customer_id, type, file) => call("uploadIdProof", { customer_id, type, file }), // -> { path, name }
 
-  // device master (Devices + Lists tabs)
+  // device master (Devices + Lists tables)
   getDeviceMaster: () => call("getDeviceMaster"),
 
-  // One request instead of three (customers + leads + device master) — used right after login,
-  // so the app isn't firing several requests at once against the account's concurrency limit.
-  bootstrap: () => call("bootstrap"),
+  // customers + leads + device master in one go. For a few seconds after login this returns the data
+  // that came with the login response (no network request); any later call fetches fresh data.
+  bootstrap: () => {
+    if (prefetched && Date.now() - prefetchedAt < PREFETCH_TTL_MS) return Promise.resolve(prefetched);
+    prefetched = null;
+    if (!bootPromise) bootPromise = call("bootstrap").finally(() => { bootPromise = null; });
+    return bootPromise;
+  },
 
   // leads
   listLeads: () => call("listLeads"),
   createLead: (lead) => call("createLead", { lead }),
+
+  // The whole "Add lead" save in ONE request: [new customer] + ID proof uploads + lead + customer
+  // ID-proof fields. App.jsx listens for "lead-saved" to add the new rows to its lists.
+  // payload: { new_customer?, files: [{type, file}], id_proof_types, lead }  ->  { customer, lead }
+  submitLead: async (payload) => {
+    const result = await call("submitLead", payload);
+    window.dispatchEvent(new CustomEvent("lead-saved", { detail: result }));
+    return result;
+  },
   updateLead: (lead_id, patch) => call("updateLead", { lead_id, patch }),
 
   // admin: field executives
