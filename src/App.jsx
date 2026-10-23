@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback } from "react";
-import { Routes, Route, useNavigate, useParams, useLocation, Navigate } from "react-router-dom";
+import { Routes, Route, useNavigate, useParams, useLocation, useSearchParams, Navigate } from "react-router-dom";
 import { api } from "./sheetsApi";
 import { C } from "./constants/colors";
 import { Shell } from "./componets/ui/Shell";
@@ -12,6 +12,7 @@ import { initialWizard } from "./screens/wizard/InitialWizard";
 import { AdminShell } from "./screens/admin/AdminShell";
 import { EditLeadModal } from "./screens/edit/EditLeadModal";
 import { EditCustomerModal } from "./screens/edit/EditCustomerModal";
+import { QrBind } from "./screens/qr/QrBind";
 import { toCamelCustomer, toCamelLead, toCamelFe } from "./utils/mappers";
 import { buildMaster, EMPTY_MASTER } from "./utils/master";
 
@@ -39,6 +40,7 @@ export default function App() {
   const [session, setSession] = useState(loadSession);
   const [wizard, setWizard] = useState(null);
   const [master, setMaster] = useState(EMPTY_MASTER);
+  const [qrMap, setQrMap] = useState({}); // leadId -> { code, display }
   const [editingLeadId, setEditingLeadId] = useState(null);
   const [editingCustomerId, setEditingCustomerId] = useState(null);
 
@@ -59,12 +61,32 @@ export default function App() {
     setMaster(masterRaw ? buildMaster(masterRaw) : EMPTY_MASTER);
   }, []);
 
+  // Which leads already have a QR. Optional data: a failure here must never block the app.
+  const loadQr = useCallback(async () => {
+    try {
+      const rows = await api.listBoundLeads();
+      setQrMap(Object.fromEntries(rows.map((r) => [r.lead_id, { code: r.code, display: r.display }])));
+    } catch {
+      /* QR tags are optional */
+    }
+  }, []);
+
+  const refreshAll = useCallback(async () => {
+    await loadData();
+    await loadQr();
+  }, [loadData, loadQr]);
+
+  const onQrBound = useCallback((leadId, qr) => {
+    setQrMap((prev) => ({ ...prev, [leadId]: qr }));
+  }, []);
+
   const clearSession = useCallback(() => {
     sessionStorage.removeItem("session");
     setSession(null);
     setWizard(null);
     setCustomers([]);
     setLeads([]);
+    setQrMap({});
     setMaster(EMPTY_MASTER);
     setEditingLeadId(null);
     setEditingCustomerId(null);
@@ -99,6 +121,8 @@ export default function App() {
   useEffect(() => {
     (async () => {
       try {
+        // QR tags load in the background and never block the rest
+        if (session) loadQr();
         // field executives (public, for the login dropdown) and app data (only if logged in)
         // load at the same time instead of one after the other
         const fePromise = api.listFieldExecutives().then((feRows) => {
@@ -156,6 +180,7 @@ export default function App() {
       await api.logout();
       throw e;
     }
+    loadQr(); // QR tags load in the background
     sessionStorage.setItem("session", JSON.stringify(s));
     setSession(s);
     navigate(s.role === "admin" ? "/admin" : "/fe/dashboard");
@@ -193,6 +218,9 @@ export default function App() {
                 onAddLead={() => { setWizard(initialWizard()); navigate("/fe/add-lead"); }}
                 onOpenCustomer={(id) => navigate(`/customer/${id}`, { state: { from: "fe-dashboard" } })}
                 onEditLead={setEditingLeadId}
+                qrMap={qrMap}
+                onAttachQr={(id) => navigate(`/bind?lead=${encodeURIComponent(id)}`)}
+                onScanQr={() => navigate("/bind")}
               />
             ) : <Navigate to="/login" replace />
           }
@@ -213,6 +241,7 @@ export default function App() {
                 onCancel={() => { setWizard(null); navigate("/fe/dashboard"); }}
                 onDone={(customerId) => { setWizard(null); navigate(`/customer/${customerId}`, { state: { from: "fe-dashboard" } }); }}
                 onFinishToDashboard={() => { setWizard(null); navigate("/fe/dashboard"); }}
+                onAttachQr={(id) => { setWizard(null); navigate(`/bind?lead=${encodeURIComponent(id)}`); }}
               />
             ) : <Navigate to={session?.role === "fe" ? "/fe/dashboard" : "/login"} replace />
           }
@@ -221,7 +250,24 @@ export default function App() {
         <Route
           path="/customer/:customerId"
           element={
-            session ? <CustomerProfileRoute customers={customers} leads={leads} session={session} setWizard={setWizard} onEditLead={setEditingLeadId} onEditCustomer={setEditingCustomerId} /> : <Navigate to="/login" replace />
+            session ? <CustomerProfileRoute customers={customers} leads={leads} session={session} setWizard={setWizard} onEditLead={setEditingLeadId} onEditCustomer={setEditingCustomerId} qrMap={qrMap} /> : <Navigate to="/login" replace />
+          }
+        />
+
+        <Route
+          path="/bind"
+          element={
+            session ? (
+              <QrBindRoute
+                session={session}
+                leads={leads}
+                customers={customers}
+                qrMap={qrMap}
+                onBound={onQrBound}
+                onRefresh={refreshAll}
+                flash={flash}
+              />
+            ) : <Navigate to="/login" replace />
           }
         />
 
@@ -239,6 +285,7 @@ export default function App() {
                 flash={flash}
                 onOpenCustomer={(id) => navigate(`/customer/${id}`, { state: { from: "admin" } })}
                 onEditLead={setEditingLeadId}
+                onScanQr={() => navigate("/bind")}
               />
             ) : <Navigate to="/login" replace />
           }
@@ -284,7 +331,7 @@ export default function App() {
   );
 }
 
-function CustomerProfileRoute({ customers, leads, session, setWizard, onEditLead, onEditCustomer }) {
+function CustomerProfileRoute({ customers, leads, session, setWizard, onEditLead, onEditCustomer, qrMap }) {
   const { customerId } = useParams();
   const navigate = useNavigate();
   const location = useLocation();
@@ -298,11 +345,31 @@ function CustomerProfileRoute({ customers, leads, session, setWizard, onEditLead
       session={session}
       onEditLead={onEditLead}
       onEditCustomer={onEditCustomer}
+      qrMap={qrMap}
+      onAttachQr={(id) => navigate(`/bind?lead=${encodeURIComponent(id)}`)}
       onBack={() => navigate(from === "admin" ? "/admin" : "/fe/dashboard")}
       onAddLead={(cId, mobile) => {
         setWizard(initialWizard({ customerId: cId, mobile, skipTo: "device" }));
         navigate("/fe/add-lead");
       }}
+    />
+  );
+}
+
+function QrBindRoute({ session, leads, customers, qrMap, onBound, onRefresh, flash }) {
+  const [params] = useSearchParams();
+  const navigate = useNavigate();
+  return (
+    <QrBind
+      session={session}
+      leads={leads}
+      customers={customers}
+      qrMap={qrMap}
+      initialLeadId={params.get("lead") || ""}
+      onBound={onBound}
+      onRefresh={onRefresh}
+      flash={flash}
+      onBack={() => navigate(session.role === "admin" ? "/admin" : "/fe/dashboard")}
     />
   );
 }

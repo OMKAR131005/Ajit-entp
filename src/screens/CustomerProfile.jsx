@@ -1,5 +1,5 @@
 import { useMemo } from "react";
-import { Phone, Plus, Pencil } from "lucide-react";
+import { Phone, Plus, Pencil, QrCode } from "lucide-react";
 import { C } from "../constants/colors";
 import { Badge } from "../componets/ui/Badge";
 import { Row } from "../componets/ui/Row";
@@ -7,7 +7,7 @@ import { BackBtn } from "../componets/ui/BackBtn";
 import { BigButton } from "../componets/ui/Bigbutton";
 import { fmtDate, fmtDateTime, inr, specLine } from "../utils/formatters";
 
-export function CustomerProfile({ customerId, customers, leads, session, onBack, onAddLead, onEditLead, onEditCustomer }) {
+export function CustomerProfile({ customerId, customers, leads, session, onBack, onAddLead, onEditLead, onEditCustomer, qrMap = {}, onAttachQr }) {
   const customer = customers.find((c) => c.id === customerId);
   const history = useMemo(
     () => leads.filter((l) => l.customerId === customerId).sort((a, b) => new Date(b.visitDate) - new Date(a.visitDate)),
@@ -68,6 +68,7 @@ export function CustomerProfile({ customerId, customers, leads, session, onBack,
           <Row label="Lead ID" value={latest.leadId} />
           <Row label="Device" value={`${latest.deviceBrand} ${latest.deviceModel}`} />
           <LeadDetails l={latest} />
+          <QrRow lead={latest} qrMap={qrMap} onAttachQr={onAttachQr} />
           <Row label="Expected price" value={inr(latest.expectedPrice)} />
           <Row label="Purchase price" value={inr(latest.purchasePrice)} />
           <Row label="Commission" value={`${latest.commission} → ${inr(latest.commissionAmount)}`} />
@@ -105,6 +106,7 @@ export function CustomerProfile({ customerId, customers, leads, session, onBack,
               </div>
               <Row label="Lead ID" value={l.leadId} />
               <LeadDetails l={l} />
+              <QrRow lead={l} qrMap={qrMap} onAttachQr={onAttachQr} />
               <Row label="Purchase price" value={inr(l.purchasePrice)} />
               <Row label="Commission" value={inr(l.commissionAmount)} />
               <Row label="Field executive" value={l.feName} />
@@ -131,6 +133,21 @@ function LeadDetails({ l }) {
       {spec && <Row label="Variant" value={spec} />}
       {l.imei1 && <Row label="IMEI 1" value={l.imei1} />}
       {l.accessories && <Row label="Accessories" value={l.accessories} />}
+    </>
+  );
+}
+
+// QR sticker status. Only purchased (Completed) phones can have a QR.
+function QrRow({ lead, qrMap, onAttachQr }) {
+  if (lead.status !== "Completed") return null;
+  const qr = qrMap[lead.leadId];
+  if (qr) return <Row label="QR label" value={qr.display} />;
+  return (
+    <>
+      <Row label="QR label" value="Not attached" />
+      <button onClick={() => onAttachQr(lead.leadId)} style={editLinkStyle}>
+        <QrCode size={13} /> Attach QR
+      </button>
     </>
   );
 }

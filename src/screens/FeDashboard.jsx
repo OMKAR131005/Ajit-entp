@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { Plus, LogOut, Pencil } from "lucide-react";
+import { Plus, LogOut, Pencil, QrCode } from "lucide-react";
 import { C } from "../constants/colors";
 import { StatTile } from "../componets/ui/StatTile";
 import { BigButton } from "../componets/ui/Bigbutton";
@@ -8,7 +8,7 @@ import { todayISO, isSameDay } from "../utils/formatters";
 
 const PAGE_SIZE = 8;
 
-export function FeDashboard({ fe, leads, customers, onLogout, onAddLead, onOpenCustomer, onEditLead }) {
+export function FeDashboard({ fe, leads, customers, onLogout, onAddLead, onOpenCustomer, onEditLead, qrMap = {}, onAttachQr, onScanQr }) {
   const mine = useMemo(() => leads.filter((l) => l.feUsername === fe.username), [leads, fe]);
   const today = todayISO();
   const counts = useMemo(() => ({
@@ -81,6 +81,9 @@ export function FeDashboard({ fe, leads, customers, onLogout, onAddLead, onOpenC
           <BigButton icon={Plus} onClick={onAddLead} style={{ padding: "18px 18px", fontSize: 17.5 }}>
             Add new lead
           </BigButton>
+          <div style={{ marginTop: 10 }}>
+            <BigButton tone="outline" icon={QrCode} onClick={onScanQr}>Scan &amp; attach QR</BigButton>
+          </div>
         </div>
 
         <div style={{ fontSize: 13, fontWeight: 700, color: C.ink2, marginBottom: 10, letterSpacing: 0.2 }}>
@@ -108,9 +111,23 @@ export function FeDashboard({ fe, leads, customers, onLogout, onAddLead, onOpenC
                   <div style={{ minWidth: 0 }}>
                     <div style={{ fontWeight: 600, fontSize: 14.5 }}>{cust ? cust.name : "Unknown customer"}</div>
                     <div style={{ fontSize: 12.5, color: C.slate }}>{l.deviceBrand} {l.deviceModel} · {l.leadId}</div>
+                    {l.status === "Completed" && (
+                      <div style={{ fontSize: 12, marginTop: 3, fontWeight: 600, color: qrMap[l.leadId] ? C.ledger : C.amber }}>
+                        {qrMap[l.leadId] ? `QR: ${qrMap[l.leadId].display}` : "No QR attached"}
+                      </div>
+                    )}
                   </div>
                   <Badge status={l.status} />
                 </button>
+                {l.status === "Completed" && !qrMap[l.leadId] && (
+                  <button onClick={() => onAttachQr(l.leadId)} aria-label={`Attach QR to lead ${l.leadId}`}
+                    style={{
+                      display: "flex", alignItems: "center", gap: 5, padding: "0 13px", cursor: "pointer",
+                      background: C.paperDim, border: "none", borderLeft: `1px solid ${C.line}`, color: C.ink2, fontSize: 12.5, fontWeight: 600,
+                    }}>
+                    <QrCode size={13} /> QR
+                  </button>
+                )}
                 <button onClick={() => onEditLead(l.leadId)} aria-label={`Edit lead ${l.leadId}`}
                   style={{
                     display: "flex", alignItems: "center", gap: 5, padding: "0 13px", cursor: "pointer",

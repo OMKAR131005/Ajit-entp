@@ -2,6 +2,7 @@
 // Set VITE_SHEETS_API_URL to the function URL (in .env locally and in Vercel).
 
 const API_URL = import.meta.env.VITE_SHEETS_API_URL;
+const QR_API_URL = import.meta.env.VITE_QR_API_URL;
 
 let token = null;
 try { token = sessionStorage.getItem("fl_token"); } catch { /* storage unavailable */ }
@@ -29,8 +30,8 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 // A request that fails at the network level, or comes back as a non-JSON error page,
 // gets a couple of quick, quiet retries before giving up.
-async function fetchOnce(action, payload) {
-  const res = await fetch(API_URL, {
+async function fetchOnce(url, action, payload) {
+  const res = await fetch(url, {
     method: "POST",
     headers: { "Content-Type": "text/plain;charset=utf-8" },
     body: JSON.stringify({ action, token, ...payload }),
@@ -43,18 +44,20 @@ async function fetchOnce(action, payload) {
 const RETRY_DELAYS_MS = [600, 1500]; // ~2 extra tries, under 2.5s total, before surfacing the error
 
 // Content-Type is text/plain so the browser skips the CORS preflight.
-async function call(action, payload = {}, { silent = false } = {}) {
-  if (!API_URL) throw new Error("App is not configured (missing VITE_SHEETS_API_URL).");
+// url: which backend function to call. retry: false for actions that must never run twice.
+async function call(action, payload = {}, { silent = false, url = API_URL, retry = true } = {}) {
+  if (!url) throw new Error("App is not configured (missing API URL in .env).");
 
+  const delays = retry ? RETRY_DELAYS_MS : [];
   let json, lastErr;
-  for (let attempt = 0; attempt <= RETRY_DELAYS_MS.length; attempt++) {
+  for (let attempt = 0; attempt <= delays.length; attempt++) {
     try {
-      json = await fetchOnce(action, payload);
+      json = await fetchOnce(url, action, payload);
       lastErr = null;
       break;
     } catch (e) {
       lastErr = e;
-      if (attempt < RETRY_DELAYS_MS.length) await sleep(RETRY_DELAYS_MS[attempt]);
+      if (attempt < delays.length) await sleep(delays[attempt]);
     }
   }
   if (lastErr) throw new Error("Could not reach the server — check your connection and try again.");
@@ -71,6 +74,8 @@ async function call(action, payload = {}, { silent = false } = {}) {
   }
   return json.data;
 }
+
+const qrCall = (action, payload, opts) => call(action, payload, { url: QR_API_URL, ...opts });
 
 // ---- Files -------------------------------------------------------------
 
@@ -170,4 +175,9 @@ export const api = {
   updateFieldExecutive: (username, name) => call("updateFieldExecutive", { username, name }),
   setFieldExecutivePassword: (username, password) => call("setFieldExecutivePassword", { username, password }),
   setFieldExecutiveActive: (username, active) => call("setFieldExecutiveActive", { username, active }),
+    // QR labels (qr-handler function)
+  generateQr: (count) => qrCall("generateQr", { count }, { retry: false }), // never auto-retried, would make a second batch
+  checkQr: (code) => qrCall("checkQr", { code }),
+  bindQr: (code, lead_id) => qrCall("bindQr", { code, lead_id }),
+    listBoundLeads: () => qrCall("listBoundLeads", {}, { silent: true }),
 };
