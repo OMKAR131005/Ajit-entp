@@ -1,13 +1,15 @@
-import { useMemo } from "react";
-import { Phone, Plus, Pencil } from "lucide-react";
+import { useMemo, useState } from "react";
+import { Phone, Plus, Pencil, FileText } from "lucide-react";
 import { C } from "../constants/colors";
 import { Badge } from "../componets/ui/Badge";
 import { Row } from "../componets/ui/Row";
 import { BackBtn } from "../componets/ui/BackBtn";
 import { BigButton } from "../componets/ui/Bigbutton";
 import { fmtDate, fmtDateTime, inr, specLine } from "../utils/formatters";
+import { CustomerDocuments } from "./CustomerDocuments";
 
 export function CustomerProfile({ customerId, customers, leads, session, onBack, onAddLead, onEditLead, onEditCustomer }) {
+  const [showDocs, setShowDocs] = useState(false);
   const customer = customers.find((c) => c.id === customerId);
   const history = useMemo(
     () => leads.filter((l) => l.customerId === customerId).sort((a, b) => new Date(b.visitDate) - new Date(a.visitDate)),
@@ -46,6 +48,11 @@ export function CustomerProfile({ customerId, customers, leads, session, onBack,
         {canEditCustomer && (
           <button onClick={() => onEditCustomer(customer.id)} style={editLinkStyle}>
             <Pencil size={13} /> Edit customer details
+          </button>
+        )}
+        {session.role === "admin" && (
+          <button onClick={() => setShowDocs(true)} style={{ ...editLinkStyle, marginLeft: 8 }}>
+            <FileText size={13} /> View documents
           </button>
         )}
         <div style={{ marginTop: 12 }}>
@@ -114,6 +121,8 @@ export function CustomerProfile({ customerId, customers, leads, session, onBack,
           ))}
         </div>
       )}
+
+      {showDocs && <CustomerDocuments customerId={customer.id} onClose={() => setShowDocs(false)} />}
     </div>
   );
 }

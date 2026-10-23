@@ -138,6 +138,7 @@ export const api = {
   createCustomer: (customer) => call("createCustomer", { customer }),
   updateCustomer: (customer_id, patch) => call("updateCustomer", { customer_id, patch }),
   uploadIdProof: (customer_id, type, file) => call("uploadIdProof", { customer_id, type, file }), // -> { path, name }
+  getCustomerDocuments: (customer_id) => call("getCustomerDocuments", { customer_id }), // admin only -> [{ name, url, isPdf }]
 
   // device master (Devices + Lists tables)
   getDeviceMaster: () => call("getDeviceMaster"),
